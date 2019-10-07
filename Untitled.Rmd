@@ -7,6 +7,12 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+test_values = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Test_set_values.csv'),  header = TRUE, dec = ".", sep = ",")
+train_values = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Training_set_values.csv'),  header = TRUE, dec = ".", sep = ",")
+train_labels = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Training_set_labels.csv'),  header = TRUE, dec = ".", sep = ",")
+test_labels = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Submission_format.csv'),  header = TRUE, dec = ".", sep = ",")
+
 ```
 
 ## R Markdown
