@@ -5,8 +5,31 @@ date: "10/7/2019"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
+## Load Data
+
+```{r load libraries and datasets, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+library(Metrics)
+library(readr)
+library(ggplot2)
+library(e1071)     
+library(glmnet)    
+library(caret)     
+library(FSelector) 
+library(dplyr)
+library(stats)
+library(purrr)
+library(tidyr)
+library(questionr)
+library(doMC)
+library(maptree)
+library(corrplot)
+library(data.table)
+library(scales)
+library(MASS)
+library(rpart)
+library(rpart.plot)
 
 test_values = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Test_set_values.csv'),  header = TRUE, dec = ".", sep = ",")
 train_values = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Training_set_values.csv'),  header = TRUE, dec = ".", sep = ",")
@@ -15,22 +38,45 @@ test_labels = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_
 
 ```
 
-## R Markdown
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+```{r cars} 
+# este codigo sale en el markdown
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+str(train_values)
+summary(train_values)
+head(train_values)
+dim(train_values) # 180x14
+class(train_values) # data.frame
 
-```{r cars}
-summary(cars)
+# combine datasets
+training <- left_join(train_values, train_labels) # joining by id
+testing <- left_join(test_values, test_labels) # joining by id
+
+# join train and test values to do transformations
+df <- rbind(training, testing)
+df <- df[,-1] # remove the ID for the exercise and we will include it at the end
+# training: [,1:59400]
+# testing: [,59401:74250]
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
 
 ```{r pressure, echo=FALSE}
-plot(pressure)
+#con echo = FALSE el codigo no sale en el markdown
+
+missing <- sapply(df, function(x){sum(is.na(x))})
+missing[order(missing, decreasing = TRUE)] # there are no missing values
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+# see number of unique values per feature
+unique_values<- function(x){
+return(length(unique(x)));
+}
+unique <- sapply(df, unique_values)
+unique[order(unique)]
+
+# recorded_by is constant
+```
+
