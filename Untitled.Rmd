@@ -5,7 +5,139 @@ date: "10/7/2019"
 output: html_document
 ---
 
-## Load Data
+```{r Model with CV Functions}
+RandomForest.model <-  function(training_dataset){
+  
+  trainControlRandomForest <- trainControl(method = "repeatedcv", 
+                                  number = 5, 
+                                  repeats = 1,
+                                  returnResamp = "all",
+                                  verboseIter = F,
+                                  allowParallel = T,
+                                  sampling = "up")
+                                  
+  
+  set.seed(123)  
+  registerDoMC(cores=4)
+  this.model <- train(status_group ~ ., data = training_dataset, 
+                      method = "rf", 
+                      metric = "Accuracy",
+                      preProc = c("center", "scale"),
+                      trControl = trainControlRandomForest,
+                      tuneLength = 50, # for random search
+                      num.threads = 4
+  ) 
+  
+  return(this.model)
+}
+
+Glmnet.model <- function(training_dataset) {
+  trainControlLasso <- trainControl(method = "repeatedcv", 
+                                    number = 5, 
+                                    repeats = 1,
+                                    returnResamp = "all",
+                                    verboseIter = F,
+                                    sampling = "up")
+  
+  gridGlmnet<- expand.grid(alpha = seq(0, 1, by = 0.01), 
+                         lambda = seq(0.001, 0.05, by = 0.01)) 
+  
+  set.seed(123)  
+  this.model <- train(status_group~ ., data = training_dataset, 
+                           method = "glmnet", 
+                           metric = "Accuracy",
+                           preProc = c("center", "scale"),
+                           trControl = trainControlLasso,
+                           tuneGrid = gridGlmnet
+                           ) 
+  
+  
+  return(this.model)
+}
+
+Tree.model <-  function(training_dataset){
+  trainControlTree <- trainControl(method = "repeatedcv", 
+                                   number = 5, 
+                                   repeats = 1,
+                                   returnResamp = "all",
+                                   verboseIter = F,
+                                   sampling = "up")
+
+  
+  
+  set.seed(123)  
+  this.model <- train(status_group~ ., data = training_dataset, 
+                     method = "rpart", 
+                     metric = "Accuracy",
+                     preProc = c("center", "scale"),
+                     trControl = trainControlTree,
+                     tuneLength = 200 # for random search
+  ) 
+  return(this.model)
+}
+
+XGB.model <-  function(training_dataset){
+  
+  trainControlXGB <- trainControl(method = "repeatedcv", 
+                                  number = 5, 
+                                  repeats = 1,
+                                  returnResamp = "all",
+                                  verboseIter = F,
+                                  allowParallel = TRUE,
+                                  sampling = "up")
+                                  
+  registerDoMC(cores=4)
+  set.seed(123)  
+  this.model <- train(status_group ~ ., data = training_dataset, 
+                    method = "xgbTree", 
+                    metric = "Accuracy",
+                    preProc = c("center", "scale"),
+                    trControl = trainControlXGB,
+                    tuneLength = 20, # for random search
+                    num.threads = 4
+                    ) 
+  
+  return(this.model)
+}
+
+lm.model <- function(training_dataset) {
+  
+  # Create a training control configuration that applies a 5-fold cross validation
+  train_control_config <- trainControl(method = "repeatedcv", 
+                                       number = 2, 
+                                       repeats = 1,
+                                       returnResamp = "all",
+                                       verboseIter = F,
+                                       sampling = "up")
+  
+  # Fit a glm model to the input training data
+  set.seed(123)
+  this.model <- train(status_group~ .,
+                      data = training_dataset, #the dataset is what will change 
+                      method = "glm", 
+                      metric = "Accuracy",
+                      preProc = c("center", "scale"),
+                      trControl=train_control_config)
+  
+  return(this.model)
+}
+
+```
+
+```{r Model Compare function}
+Model.compare <- function(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "None"){
+  ## This function compares the accuracy of lm.model, Glmnet.model, Tree.model and RandomForest.model
+  accuracies <- c(max(LmModel$results$Accuracy), max(GlmnetModel$results$Accuracy), 
+                  max(TreeModel$results$Accuracy), max(RandomForestModel$results$Accuracy))
+  
+  models <- c("Linear", "Glmnet", "Tree", "RandomForest")
+  treatment <- rep(TreatmentDescription, 4)
+  df <- data.frame(Model = models,
+                   Accuracy = accuracies,
+                   Treatment = treatment)
+  return(df)
+}
+```
 
 ```{r load libraries and datasets, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -38,9 +170,7 @@ test_labels = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_
 
 ```
 
-
-```{r cars} 
-# este codigo sale en el markdown
+```{r join tables, echo=FALSE} 
 
 str(train_values)
 summary(train_values)
@@ -54,29 +184,132 @@ testing <- left_join(test_values, test_labels) # joining by id
 
 # join train and test values to do transformations
 df <- rbind(training, testing)
-df <- df[,-1] # remove the ID for the exercise and we will include it at the end
-# training: [,1:59400]
-# testing: [,59401:74250]
+df <- df[,!(names(df) %in% c("id"))] # Removing ID variable and recorded_by as it is constant.
+str(df)
+# train: [,1:59400]
+# test: [,59401:74250]
 ```
 
-
-
-```{r pressure, echo=FALSE}
-#con echo = FALSE el codigo no sale en el markdown
-
+```{r missing values, echo=FALSE}
 missing <- sapply(df, function(x){sum(is.na(x))})
-missing[order(missing, decreasing = TRUE)] # there are no missing values
+missing[order(missing, decreasing = TRUE)] # there are no missing values.... for now.
 
 ```
 
-```{r}
-# see number of unique values per feature
+```{r unique values}
+# see number of unique values per feature. focus on factors with high number of unique values later
 unique_values<- function(x){
 return(length(unique(x)));
 }
 unique <- sapply(df, unique_values)
 unique[order(unique)]
 
-# recorded_by is constant
+# recorded_by is constant -> we can remove it and include it at the end.
+df <- df[,!(names(df) %in% c('recorded_by'))]
 ```
+
+Description of the features:
+amount_tsh - Total static head (amount water available to waterpoint) - 300.0 - numeric - ok
+#date_recorded - The date the row was entered - date. - actual format is factor - should it be here or its just a kind of id
+funder - Who funded the well - factor - 2400 different values 
+gps_height - Altitude of the well - int
+installer - Organization that installed the well - factor
+#longitude - GPS coordinate - numeric - should be changed
+#latitude - GPS coordinate - numeric - should be changed
+wpt_name - Name of the waterpoint if there is one - factor
+#num_private - ??????????????
+#basin - Geographic water basin - factor - related to gps
+#subvillage - Geographic location - factor - related to gps - plus 20k factors
+#region - Geographic location - factor - related to gps
+#region_code - Geographic location (coded) - int (should be changed to factor)
+#district_code - Geographic location (coded) - int (should be changed to factor)
+#lga - Geographic location - related to gps
+#ward - Geographic location - related to gps - plus 2000 factors
+population - Population around the well - int
+#public_meeting - True/False - why is three levels? double check what it is.
+#recorded_by - Group entering this row of data
+scheme_management - Who operates the waterpoint - factor
+#scheme_name - Who operates the waterpoint - factor with 2869 dif values! maybe just keep scheme managment
+#permit - If the waterpoint is permitted - True/False - why is three levels? double check what it is.
+#construction_year - Year the waterpoint was constructed - should be factor?
+extraction_type - The kind of extraction the waterpoint uses - factor 18levels
+#extraction_type_group - The kind of extraction the waterpoint uses - factor 13levels (related to extraction type)
+#extraction_type_class - The kind of extraction the waterpoint uses - factor 7levels(related to extraction type)
+management - How the waterpoint is managed - factor w 12 levels
+#management_group - How the waterpoint is managed - factor w 5 levels (related to managment)
+payment - What the water costs - factor
+payment_type - What the water costs - factor
+water_quality - The quality of the water - factor w 8levels
+#quality_group - The quality of the water - related to water_quality
+quantity - The quantity of water - quantity
+#quantity_group - The quantity of water - related to quantity
+source - The source of the water
+#source_type - The source of the water
+#source_class - The source of the water (related to source_type)
+waterpoint_type - The kind of waterpoint
+#waterpoint_type_group - The kind of waterpoint (related to waterpoint_type)
+
+```{r Histogram of numeric variables}
+df %>% 
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()
+
+# will drop district_code and region_code, num_private
+# re run amount_tsh & population
+# gps_height seems to be missing = 0 -> replace values with average
+# construction year = 0 -> replace values with average
+
+summary(df$amount_tsh)
+df %>% 
+  ggplot(aes(amount_tsh)) +
+  geom_boxplot()
+```
+
+```{r Separe train from test after the Feature Engineering to run the models}
+train <- df[1:59400,]
+```
+
+```{r}
+# functions on top do CV so no need to apply this manual split. its better but very slow.
+trainIndex = createDataPartition(train$status_group, p=0.7, list=FALSE, times=1) 
+train.ind = train[trainIndex,]
+test.ind = train[-trainIndex,]
+```
+
+```{r}
+RandomForestModel <- RandomForest.model(train)
+GlmnetModel <- Glmnet.model(train)
+LmModel <- lm.model(train)
+```
+
+```{r}
+tree_model <- rpart(status_group~., data=train, method="class")
+tree_model0$variable.importance 
+rpart.plot(tree_model0, type = 1, fallen.leaves = F, extra = 4)
+
+predictions <- predict(tree_model0, test)
+confusionMatrix(as.factor(apply(predictions,1,which.max)),as.factor(test$V1))
+```
+
+```{r comparison DF}
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "none"))
+comparisonDF
+```
+
+```{r Predictions}
+#with final model
+final.pred <- predict(RandomForestModel, test, type = "raw")
+predictions <- data.frame(id = test_labels$id, status_group = (final.pred))
+colnames(predictions) <-c("id", "status_group")
+write.csv(predictions, file = "predictions.csv", row.names = FALSE) 
+```
+
+
+
+
+
+
 
