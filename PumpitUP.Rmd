@@ -1,0 +1,970 @@
+---
+title: "ML2-Assignment2"
+author: "GroupA"
+date: "10/7/2019"
+output: html_document
+---
+
+# 1. INTRODUCTION 
+This project explored the use of a variety of predictive/classification modeling techniques for purposes of predicting the functional status of water pumps located within the country of Tanzania on the basis of data provided via a www.DrivenData.org data challenge competition. Hand-driven and gravity fed water pumps are a key source of potable water throughout much of Africa and a smart understanding of which waterpoints will fail can improve maintenance operations and ensure that clean, potable water is available to communities across Tanzania.
+According to Tanzania's Ministry of Water, more than 74,000 such pumps can be found throughout the country. While the installation of these pumps is largely funded via contributions from charitable and other non-governmental organizations (NGO's), their ongoing maintenance is typically the responsibility of the local community within which they reside. Unfortunately, the cost of maintaining the pumps is often beyond the means of the local community, resulting in pumps becoming non-functional. Furthermore, local communities are often unaware of the need to perform the required maintenance due to the apparent lack of any significant problems with a pump up until the point it ultimately fails.
+In order to predict one of the three classes of the status of the pump (functional, non-functional, functional and needs repair) we will clean the data filling missing values, do the necessary feature engineering and feature selection to finally run the best models. 
+We are working based on a number of independent variables about when and where it was installed, the kind of operation and how it is managed.
+
+Load packages and datasets (NOTE: this analysis was carried out using Rstudio version 3.5.3, some packages may not run in later versions)
+```{r load libraries and datasets, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(Metrics)
+library(readr)
+library(ggplot2)
+library(e1071)     
+library(glmnet)    
+library(caret)     
+library(FSelector) 
+library(dplyr)
+library(stats)
+library(purrr)
+library(tidyr)
+library(questionr)
+library(doMC)
+library(maptree)
+library(corrplot)
+library(data.table)
+library(scales)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(nnet)
+library(skimr)
+library(gbm)
+library(grDevices)
+library(leaps)
+library(mlbench)
+library(mltools)
+library(GoodmanKruskal)
+library(randomForest)
+library(xgboost)
+
+predict_values = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Test_set_values.csv'),  header = TRUE, dec = ".", sep = ",")
+train_values = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Training_set_values.csv'),  header = TRUE, dec = ".", sep = ",")
+train_labels = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Training_set_labels-2.csv'),  header = TRUE, dec = ".", sep = ",")
+predict_labels = read.csv(file = file.path('Pump_it_Up_Data_Mining_the_Water_Table_-_Submission_format-2.csv'),  header = TRUE, dec = ".", sep = ",")
+
+```
+
+First step before doing data preparation:
+Combine datasets for data cleaning and preprocessing. Join by id and stack on df for transformations. The dataset is already devided in train and test (in our case called predict) 
+```{r join tables, echo=FALSE} 
+train <- left_join(train_values, train_labels) # joining by id
+predict <- left_join(predict_values, predict_labels) # joining by id
+
+df <- rbind(train, predict)
+```
+
+# 2. Exploratory Data Analysis
+During this section, we will work only on the train dataset. 
+
+## 2.1 Quick look at the dataset
+Get a look at the dataset using skimmed and str. Investigation of the characteristics of each individual variable contained within the train data set, including their data types, range of valid values, their distributions, and missing data values. 
+
+```{r}
+skimmed <- skim_to_wide(train)
+skimmed[,c(1:3,5:6,9,10,16)]
+str(train)
+summary(train)
+```
+Multiple factor variables are included and some of them with high number of levels.
+Numeric variables are not normalize but digging depper on their meaning we will decide during further analysis how to transform them.
+We can see there are no missing values but from histograms we see some values with 0s.
+
+
+## 2.2 Distribution of the label (status_group) - dependent variable to predict.
+At this step we check if the target variable is balanced in the dataset
+```{r}
+# absolute numbers
+table(train$status_group) 
+# proportions
+prop.table(table(train$status_group))
+```
+Dependent variable distribution (waterpump status):
+54.30% of the pumps are functional
+7.27% are functional but needs repairs
+38.43% are non functional
+
+There is a low number of pumps functional but need repair, other than that, the data is well balanced. This may make it difficult to predict accurately the functional needs repair pumps with linear or tree models.
+
+
+## 2.3 Unique values
+We observe factors with high number of unique values (levels) that will need to be treated (#4.2 feature engineering) before introducing in the model.
+```{r unique values}
+unique_values<- function(x){
+return(length(unique(x)));
+}
+unique <- sapply(train, unique_values)
+unique[order(unique)]
+
+```
+
+## 2.4 Missing values (NAs)
+In a previous step: #2.1 we saw using summary that there are No NAs but we will double check.
+During further analysis we will see, as well, there are some empty spaces and invalid values (0s) in both continuous and categorical features.
+```{r}
+missing <- sapply(train, function(x){sum(is.na(x))})
+missing[order(missing, decreasing = TRUE)]
+
+```
+
+
+## 2.5 Compare the total status_group values (sec 2.2) with their distribution just comparing other categorical values (those with low cardinality as pointed out in sec.2.3) 
+Using a table we can evalaute if any independent variable unbalanced (factors) or squewed (cont.) is present.
+We will see if there is any high level relationship between group variables (for example: quantity and quantity_group)
+
+#Payment:
+Those WP paying has higher percentage of functional while with the not paying the distribution is similar.
+```{r}
+# absolute numbers
+table(train$payment, train$status_group)
+# proportions
+prop.table(table(train$payment, train$status_group), margin = 1)
+
+```
+
+We can observe that on those cases where users pays for the service (on any way) the average of functional is significantly higher than in those cases where users are not paying. On the other hand, we can observe one reason explaining non functional relates with never pay.
+
+#Quantity
+Table of the quantity variable vs the status of the pumps
+```{r}
+table(train$quantity, train$quantity_group) # mirror
+table(train$quantity, train$status_group)
+```
+From the table above we see more than 50% of the pumps are enough or insuficient but when comparing them with the status we can see the mayority of functional are enough and the mayority of non functional are dry or enough.
+During feature selection we will see if this variable explains the model.
+
+#Public_meeting
+Check if it is a useful variable to consider
+```{r}
+freq(train$public_meeting)
+prop.table(table(train$public_meeting, train$status_group), margin = 1)
+```
+While 85% of the values are TRUE, on the FALSE (8%) values we see a higher proportion of non functioning wells. highly unbalanced feature
+
+
+#Num_private
+98.7% of the values are 0! doesnt seem to be a very useful variable.
+```{r}
+freq(train$num_private) 
+num_priv_table <- table(train$num_private, train$status_group)
+num_priv_table_prop <- prop.table(table(train$num_private, train$status_group), margin = 1)
+```
+
+
+The widespread incidence of missing data throughout the data set was a strong indicator of the need for the development of statistically valid data imputation algorithms for many of the affected variables. For this we will start analyzing the correlation between independent variables in order to maximize the accuracy of our imputations.
+
+# 2.6 Checking independence of the numeric variables: Correlation Matrix 
+```{r}
+nums <- sapply(train, is.numeric)
+data.numeric <- train[ ,c(nums)]
+data.without_na <- na.omit(data.numeric)
+cor_matrix <- cor(data.without_na)
+corrplot(cor_matrix)
+findCorrelation(cor_matrix, 0.7)
+```
+
+We can observe the correlation between variables is relatively low. Variables latitude,longitude, gps_hegith and construction_year (specially this last two) present a medium/high correlation, which make sense as those represent the location of the water pumps.
+District code and region code are pretty similar, they represent the same but at different levels, further on in feature engineering we will specify how geographic variables were treated.
+
+Note: id appears as numeric and we won´t change it into categorical as we won´t use it in the analysis.
+
+## 2.6.1 Correlation between numerical variables and the target variable (first approach)
+
+```{r}
+target <- train$status_group
+target <- recode(target,'functional'=1,'non functional'=2,'functional needs repair'=3)
+new <- cbind(train,target)
+head(new$target)
+nums <- sapply(new, is.numeric)
+data.numeric <- new[ ,c(nums)]
+data.without_na <- na.omit(data.numeric)
+head(data.without_na)
+
+cor(data.without_na[-1], data.without_na$target) 
+```
+We wanted to first check with a simple correlation between numeric and the target variable, if those were good to explained the latter one. As we could infer from the calculation, it´s not a good idea to transform the target variable into numeric as not all values were recognized due to spaces on the cells and therefore not all rows were taking into account to set the relationhip between numeric variables and the target variable.
+
+## 2.7 Correlation matrix within factors (only for geoagraphic features)
+
+```{r}
+train_region <- train[,(names(train) %in% c("latitude", "longitude", 'gps_height', 'region', 'basin', 'subvillage', 'region','region_code','district_code','lga','ward'))] 
+
+factors <- sapply(train_region, is.factor)
+data.factor <- train_region[1:500,c(factors)]
+gkmatrix <- GKtauDataframe(data.factor)
+plot(gkmatrix, corrColors = 'blue')
+
+```
+
+As we can observe, the output is not really good but we get first approach confirming relationship between regions.
+
+## 2.8 ChiSquare test to see if there is a correlation between certain categorical variables ( later on at the #5 feature selection step we will use chisquare to choose best variables and compare them with other techniques)
+With the aim of simplifying the model, we need to reduce the number of variables as much as possible. In this case we will check those variables we suspect are dependent to each other as they have same meaning but are classified in different levels.
+We will identify any correlation between independent features runing a chi-square test:
+
+Ho: Variables are independent
+Ha: Variables are dependent
+As p-value < 0.05 we can reject the null hypotesis in favor of Ha and conclude that the variables are dependent to each other and we will keep only 1 to run the models.
+
+
+```{r}
+chisq.test(train$quantity, train$quality_group, correct = FALSE)
+```
+
+```{r}
+chisq.test(train$management_group, train$scheme_management, correct = FALSE)
+```
+
+```{r}
+chisq.test(train$extraction_type, train$source, correct = FALSE)
+```
+
+```{r}
+chisq.test(train$source, train$waterpoint_type_group, correct = FALSE)
+
+```
+
+# 3. Visualization
+
+## 3.1 Continuous variables:
+latitude, longitude, construction_year, amount_tsh, population
+
+Valid values for Tanzania:
+        Lat between 29 and 40
+        Long between -1 and -12
+        Height: 0 to kilimanjaro (high)
+        Construction_year:
+        
+        
+```{r}
+ggplot(data=train, aes(x=longitude, y=latitude, color = status_group)) + geom_point()
+```
+No clear geographical association with the status of the wells. values at (0,0) needs to be treated.
+
+```{r}
+qplot(region,data=train, geom="bar", fill=status_group) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  theme(legend.position = "top")
+```
+
+No clear association either regarding regions
+
+```{r Histogram of numeric variables}
+train %>% 
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(x = value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram(bins = 20)
+
+# we wont consider district_code, region_code and num_private at this stage.
+```
+# amount_tsh without the zeros. not valid values for this feature
+```{r}
+ggplot(subset(train, amount_tsh > 0), aes(x = amount_tsh)) +
+  geom_histogram(bins = 20) + 
+  facet_grid( ~ status_group)
+```
+
+# gps_height seems to be missing -> only valid values
+```{r}
+ggplot(subset(train, gps_height > 0), aes(x = gps_height)) +
+  geom_histogram(bins = 20) + 
+  facet_grid( ~ status_group)
+
+```
+
+# Construction year = 0 -> only valid values
+```{r}
+ggplot(subset(train, construction_year > 0), aes(x = construction_year)) +
+  geom_histogram(bins = 20) + 
+  facet_grid( ~ status_group)
+```
+
+Regarding the class balance of the target variable, we can appreciate looking at this histogram that it could make sense to have a low number of functional needs repair and almost 40% of non functional. If we take into account the useful life of pumps that could be around 20 years if well treated, it make sense to have the mayority of non-functional with year of construction earlier than 2000 and have more functional after 2000.
+
+
+# Population <- plot only positive values
+```{r}
+ggplot(subset(train, population > 0), aes(x = population)) +
+  geom_histogram(bins = 20) + 
+  facet_grid( ~ status_group)
+```
+
+We visualize the impact of each independent feature on the labels before any transformation - only for numeric variables: gps_height, latitude,longitude,population and construction_year
+```{r}
+
+featurePlot(x=train[,c(5,7,8,18,24)], y=train$status_group, plot = 'box', strip = strip.custom(par.strip.text=list(cex=.7)), scales = list(x = list(relation = 'free'), y = list(relation='free')))
+
+
+featurePlot(x=train[,c(5,7,8,18,24)], y=train$status_group, plot = 'density', strip = strip.custom(par.strip.text=list(cex=.7)), scales = list(x = list(relation = 'free'), y = list(relation='free')))
+
+```
+
+## 3.2 Barplots for factors. 
+
+# Quantity
+5 levels. points with enough quantity has higher porcentage of functionality than others
+```{r}
+qplot(quantity, data=train, geom="bar", fill=status_group) + 
+  theme(legend.position = "top")
+```
+
+```{r}
+ggplot(train, aes(x=quantity, y=quantity_group,)) +
+  geom_jitter(alpha = 0.3)
+```
+
+# quality_group
+high percentage with quality = good (around 90%)
+```{r}
+qplot(quality_group, data=train, geom="bar", fill=status_group) + 
+  theme(legend.position = "top")
+```
+
+
+#waterpoint_type
+Communal standpipe with higher percentage of working than avg.
+```{r}
+qplot(waterpoint_type, data=train, geom="bar", fill=status_group) + 
+  theme(legend.position = "top") + 
+  theme(axis.text.x=element_text(angle = -20, hjust = 0))
+```
+
+# payment
+those paying has a better behaviour.
+```{r}
+qplot(payment, data=train, geom="bar", fill=status_group) + 
+  theme(legend.position = "top")
+```
+
+Conclusions regarding the data available:
+
+All water pumps are located in Tanzania (but one), there´s no association between pumps stations status and geographic features provided (not regarding pump location or region). Construction_year might be an importante variable to explain the model, non functional pumps will most likely be up to 20 years old.
+Functional pumps seems to be those of enough quantity and good quality, with communal standpipe and hand pump and those that have payments no matter way of payment.
+On the contrary non functional apparently are those with good quality but dry,insufficient or enough quantity and basically those with never pay or other.
+Further steps will determine which of those variables are important for the model.
+
+
+# 4. DATA TRANSFORMATION and FEATURE CREATION
+
+Note: all transformations will be kept/added to a new dataset -> df
+
+## 4.1 Filling missing values on numerical Variables:
+
+### Geographical features: LAT, LONG and Height
+
+We tested two different approaches and concluded the second one was best for our analysis. Check both of them as follows:
+
+First Approach: using regions mean
+Concluded that basin and region is the best combination to run this imputation due to the low number of missing values and the reasonable number of levels.
+
+```{r}
+#train <- train %>% group_by(basin, region) %>% mutate(region.long = mean(longitude, na.rm = TRUE), region.lat = mean(latitude, na.rm = TRUE), region.height = mean(gps_height, na.rm = TRUE))
+
+#train$longitude_mean <- ifelse(train$longitude == 0, train$region.long, train$longitude) 
+#train$latitude_mean <- ifelse(train$latitude == 0, train$region.lat, train$latitude)
+#train$gps_height_mean <- ifelse(train$gps_height == 0, train$region.height, train$gps_height)
+```
+
+Second Approach: using KNN considering all regional factors given. Conclude this one is more complete and will use this one moving forward.
+Note: package RANN needed for running the code
+```{r}
+train_region <- train[,(names(train) %in% c("latitude", "longitude", 'gps_height', 'region', 'basin', 'subvillage', 'region','region_code','district_code','lga','ward'))] 
+train_region$gps_height <- ifelse(train$gps_height <= 0, NA, train_region$gps_height)
+train_region$longitude <- ifelse(train$longitude == 0, NA, train_region$longitude)
+train_region$latitude <- ifelse(train$latitude == 0, NA, train_region$latitude)
+anyNA(train_region)
+
+preProcess_missingdata_model <- preProcess(train_region, method = 'knnImpute')
+preProcess_missingdata_model
+
+train_region <-predict(preProcess_missingdata_model, newdata = train_region)
+anyNA(train_region)
+
+df$gps_height[1:59400] <- train_region$gps_height 
+df$latitude[1:59400] <- train_region$latitude
+df$longitude[1:59400] <- train_region$longitude
+summary(df$longitude[1:59400]) # already normalized. we have to normalize the predict dataset before applying the model
+summary(df$latitude[1:59400])
+summary(df$gps_height[1:59400])
+
+```
+
+### amount_tsh 
+As previously seen there is a different behaviour (funcitional or not) on waterpoints with high values so we will try to fill the 70% of missing values using CARET package based on the link between this feature and the source, waterpoint_type and region. 
+```{r}
+train_tsh <- train[,(names(train) %in% c("amount_tsh", "longitude", 'latitude', 'source_class', 'waterpoint_type'))] 
+train_tsh$amount_tsh <- ifelse(train_tsh$amount_tsh == 0, NA, train_tsh$amount_tsh)
+anyNA(train_tsh)
+
+preProcess_missingdata_model <- preProcess(train_tsh, method = 'knnImpute')
+preProcess_missingdata_model
+
+train_tsh <-predict(preProcess_missingdata_model, newdata = train_tsh)
+anyNA(train_region)
+
+df$amount_tsh[1:59400] <- train_tsh$amount_tsh
+summary(df$amount_tsh[1:59400])
+```
+
+
+### Population
+Fill the 0s using mean. This is the only feature with a few outliers that we will clip to the upper limit (10.000) in order to avoid generating a higher mean to fill the missing values.
+We create a new variable with the normalized value of the population.
+
+```{r}
+boxplot(train$population)
+```
+
+```{r}
+train$population[train$population >= 10000] <- 10000
+train$population[train$population == 0] <- mean(train$population[train$population>0])
+
+df$population[1:59400] <- train$population
+summary(df$population[1:59400])
+df$population_n <- (df$population - mean(df$population))/sd(df$population)
+```
+
+
+### construction_year
+Please run just 1 alternative at a time. We tested two ways of imputing values and we selected the second one: KNN
+1. first aproach using mean
+```{r}
+#mean(train$construction_year[train$construction_year>0])
+df$construction_year[df$construction_year == 0] <- mean(df$construction_year[df$construction_year>0])
+#ggplot(train, aes(x = construction_year)) +
+#  geom_histogram(bins = 20) + 
+#  facet_grid( ~ status_group)
+summary(df$construction_year)
+
+df$construction_year_normal <- (df$construction_year - mean(df$construction_year))/sd(df$construction_year)
+
+```
+
+2. aproach using knn considering the relation with other features as extraction, waterpoint and regional values (lat and long) -> we conclude is a more integral aproach and we will keep this one over the first one.
+```{r}
+train_const <- train[,(names(train) %in% c("construction_year", "longitude", 'latitude', 'source_class', 'waterpoint_type'))] 
+train_const$construction_year <- ifelse(train_const$construction_year == 0, NA, train_const$construction_year)
+anyNA(train_const)
+
+preProcess_missingdata_model <- preProcess(train_const, method = 'knnImpute')
+preProcess_missingdata_model
+
+train_const <-predict(preProcess_missingdata_model, newdata = train_const)
+anyNA(train_const)
+df$construction_year[1:59400] <- train_const$construction_year
+summary(df$construction_year[1:59400])
+
+```
+
+### From date recorded we can create two new variables: age and rainy season. 
+As we mention in previous analysis construction_year is important regarding specially useful life, therefore we would like to estimate the age of the WP. Doing some research and regarding maintenance, it´s important to know if the inspection was performed during the rainy season.
+```{r}
+#df$year_recorded <- format(as.Date(df$date_recorded), "%Y")
+df$month_recorded <- format(as.Date(df$date_recorded), "%m")
+```
+
+1. age (we need to do the first approach from previous step to fill 0s on construction year to get this variable properly)
+```{r}
+df$age <- ifelse((as.numeric(df$year_recorded) - df$construction_year) <= 0, 1,(as.numeric(df$year_recorded) - df$construction_year))
+summary(df$age)
+df$age_normal <- (df$age - mean(df$age))/sd(df$age)
+summary(df$age_normal)
+```
+
+2. rainy season
+According to: https://www.expertafrica.com/tanzania/weather-and-climate. There are 2 rainy seasons: long rains (march, april and may) and short rains (november and december)
+```{r}
+df$rainy_season <- (ifelse(df$month_recorded %in% c('3','4','5','11','12'),1,0))
+str(df$rainy_season)
+```
+
+We re-run the visualization to:
+- see if there is any insight after doing the transformations.
+- values and distributions look as expected.
+
+```{r}
+featurePlot(x=df[,c(5,7,8,18,24)], y=df$status_group, plot = 'box', strip = strip.custom(par.strip.text=list(cex=.7)),labels = TRUE, 
+            scales = list(x = list(relation = 'free'), y = list(relation='free')))
+
+featurePlot(x=df[,c(5,7,8,18,24)], y=df$status_group, plot = 'density', strip = strip.custom(par.strip.text=list(cex=.7)), scales = list(x = list(relation = 'free'), y = list(relation='free')))
+```
+
+```{r}
+qplot(rainy_season, data=df, geom="bar", fill=status_group) + 
+  theme(legend.position = "top")
+```
+
+
+-----------------------------------
+
+## 4.2 Feature Engineering with Categorical Variables (we will apply this changes to the df dataset):
+
+### Management
+Group factors with less or equal than 2% frequency @ a granular level (not considering the groups)
+```{r}
+Management_frequency <- freq(train$management, digits = 5, valid = F)
+Management_frequency <- tibble::rownames_to_column(Management_frequency, "management")
+#managmnet 68% is vwc. unbalanced?
+ManagementToGroup <- Management_frequency[Management_frequency$`%` <= 2, "management"]
+df$management <- as.character(df$management) # We have to convert to character and then back
+df[df$management %in% ManagementToGroup, 'management'] <- "OTHERS"
+df$management <- as.factor(df$management)
+```
+
+### Quality
+New dummy variable called quality control good
+```{r}
+quality_frequency <- freq(train$quality_group, digits = 5, valid = F)
+quality_frequency <- tibble::rownames_to_column(quality_frequency, "quality")
+df$quality_group_good <- as.factor(recode(df$quality_group, 'good' = 1, 'fluoride' = 0, 'colored' = 0, 'milky' = 0, 'unknown' = 0, 'salty' = 0  ))
+```
+
+### Quantity
+New dummy variable called quantity frecuency enough.- special atention to season
+```{r}
+# new dummy variable called quantity frecuency enough.- special atention to season.
+quantity_frequency <- freq(train$quantity, digits = 5, valid = F)
+quantity_frequency <- tibble::rownames_to_column(quantity_frequency, "quantity")
+df$quantity_frecuency_enough <- as.factor(recode(df$quantity, 'enough' = 1, 'dry' = 0, 'insufficient' = 0, 'seasonal' = 0, 'unknown' = 0))
+q_frec <- freq(df$quantity_frecuency_enough)
+```
+
+### Waterpoint_type
+Group factors with less or equal than 1% frequency @ a granular level (not considering the groups)
+```{r}
+waterpoint_frequency <- freq(train$waterpoint_type, digits = 5, valid = F)
+waterpoint_frequency <- tibble::rownames_to_column(waterpoint_frequency,'waterpoint')
+df$waterpoint_type <- as.factor(recode(df$waterpoint_type, 'dam' = 'other', 'cattle trough' = 'other', 'improved spring' = 'other'))
+wpf <-freq(train$waterpoint_type)
+
+```
+
+### Extraction_type_group
+Group those with a frequency lower than 1%
+```{r}
+extraction_freq <- freq(train$extraction_type_group, digits = 5, valid = F)
+
+extraction_freq <- tibble::rownames_to_column(extraction_freq,'extraction')
+extractionToGroup <- extraction_freq[extraction_freq$`%` <= 2, "extraction"]
+df$extraction_type_group <- as.character(df$extraction_type_group) # We have to convert to character and then back
+df[df$extraction_type_group %in% extractionToGroup, 'extraction'] <- "others"
+df$extraction_type_group <- as.factor(df$extraction_type_group)
+str(df$extraction_type_group)
+```
+
+### Payment 
+new dummy variable if pay or not pay
+```{r}
+payment_freq <- freq(train$payment, digits = 5, valid = F)
+payment_freq
+df$pay <- as.factor(recode(df$payment, 'pay annually' = '1', 'pay monthly' = "1", 'pay per bucket' = "1", 'pay when scheme fails' = '2', 'unknown' = '0', 'never pay' = '0', 'other' = '0'))
+str(df$pay)
+```
+
+### Installer
+Alternative 1: Group those with low frequency
+```{r}
+#installer_freq <- freq(train$installer, digits = 5, valid = F)
+#installer_freq <- tibble::rownames_to_column(installer_freq,'installer')
+#installerToGroup <- installer_freq[installer_freq$`%` <= 1, "installer"]
+#df$installer <- as.character(df$installer) # We have to convert to character and then back
+#df[df$installer %in% installerToGroup, 'installer'] <- "OTHERS"
+#df$installer <- as.factor(df$installer)
+
+#freq(train$installer, digits = 5, valid = F)
+```
+
+Alternative 2: Group installer as per the first letters of the code considering there are many rows that means the same -> makes more sense. We will keep this one over the first transformation.
+```{r}
+# Observe the installer variable
+summary(train$installer)
+
+# Make installer lowercase, take first 3 letters as a substring
+df$install_3 <- substr(tolower(df$installer),1,3)
+df$install_3[df$install_3 %in% c(" ", "", "0", "_", "-")] <- "other"
+
+# Take the top 15 substrings from above by occurance frequency. We can observe the highest one is other (as we have no further details we assume numebers as other, probably they can refer to the address of those installers but as we cannot guess it, it´s better to set it as other)
+install_top_15 <- names(summary(as.factor(df$install_3)))[1:15]
+df$install_3[!(df$install_3 %in% install_top_15)] <- "other"
+df$install_3 <- as.factor(df$install_3)
+str(df$install_3)
+
+# Table of the install_3 variable vs the status of the pumps
+table(df$install_3, df$status_group)
+
+# As row-wise proportions, install_3 vs status_group
+prop.table(table(df$install_3, df$status_group), margin = 1)
+```
+
+
+# 5. FEATURE SELECTION
+
+Before running the models we will drop those order features and the ones with high cardinality that have features with group information. For aditional info on this, please refer to anex A of the presentation.
+
+```{r}
+train2 <- df[1:59400,-c(1,3,4,6,9,10,11,12,13,14,15,16,17,20,22)]
+```
+
+The methods here implemented give us an initial understanding of features that might be important to predict the label. We will use it only at the begining and then continue working with the varImp function depending on the algorithms and combinations of features used. 
+
+## 5.1 Chi-square (filter method)
+5.1.1 We will check it first for the train data ( no transformations added) - No significant results to explain
+```{r}
+weights<- data.frame(chi.squared(status_group ~.,data=train))# Chi-squared computation
+weights$feature <- rownames(weights)
+weights[order(weights$attr_importance, decreasing = TRUE),] # Order the features by their weights
+chi_squared_features_all <- weights$feature[weights$attr_importance > 0.3] # Remove the features with importance lower than 20%
+chi_squared_features_all
+```
+
+5.1.2 We now tested for the transformed data
+```{r}
+weights<- data.frame(chi.squared(status_group ~.,data=train2))# Chi-squared computation
+weights$feature <- rownames(weights)
+weights[order(weights$attr_importance, decreasing = TRUE),] # Order the features by their weights
+chi_squared_features_all <- weights$feature[weights$attr_importance > 0.3] # Remove the features with importance lower than 20%
+chi_squared_features_all
+```
+
+## 5.2 Information Gain (filter method)
+No significant results
+```{r}
+inf_gain_features<-information.gain(status_group ~.,data=train2)
+inf_gain_features$feature <- rownames(weights)
+inf_gain_features[order(inf_gain_features$attr_importance, decreasing = TRUE),] # Order the features by their weights
+inf_gain_featuresIG <- inf_gain_features$feature[inf_gain_features$attr_importance > 0.3]
+inf_gain_featuresIG
+```
+
+We are not running any wrapper method because they are computationally expensive and they dont warranty the best model results.
+Ridge and Lasso are based on linear aproaches not very good for our analysis.
+
+
+## In this step we create a subset with the variables selected for the modeling:
+We tried more than 20 different combinations arising from:
+- business knowledge
+- statistical analysis (visualization)
+- Feature selection methods.
+All results has been collected on the dt comparisonDF.
+```{r}
+df_FE <- df[,(names(df) %in% c('status_group', 'longitude','latitude', 'population_n', 'gps_height','amount_tsh','age', 'rainy_season', 'pay', 'quantity_enough', 'waterpoint_type_group','extraction_type_class'))]
+str(df_FE)
+```
+# Combinations
+amount_tsh yes/no
+pay or payment 
+quantity or quantity_enough
+water_quality or quality_enough
+construction_year or age
+public.meeting and permit yes/no
+scheme_management and/or management
+source/waterpoint_type/extraction_type_group
+installer or installer_3
+rainy_season yes or no
+
+
+# 6. PRE-MODELING
+
+## 6.1 Dummy Variables for categorical variables 
+```{r}
+#no need to dummify booleans as permit, public and rainy_season
+dummies_model <- dummyVars(status_group ~.,data=df_FE)
+trainData_mat <- predict(dummies_model, newdata = df_FE)
+df_FE <-data.frame(trainData_mat)
+str(df_FE)
+#wi will re-atach the status_group column later on the analysis.
+```
+
+## 6.2 Transformation
+Confinuous Variables transformation, possible options: range, center, scale, BoxCox.
+This shouldnt be applied to those numeric features where imputation has been done by knn.
+range: normalize values
+```{r}
+preprocess_range_model <- preProcess(df_FE, method = 'range')
+df_FE <-predict(preprocess_range_model, newdata = df_FE)
+```
+
+## 6.3 Partition in predict and train and training and testing
+```{r}
+train_FE <- df_FE[1:59400,]
+train_FE$status_group <- train$status_group
+predict_FE <- df_FE[59401:74250,]
+predict_FE$status_group <- predict$status_group
+
+# for some models we need to do a manual split of the train dataset. The first run we do it with cv on the train_FE dataset.
+str(train_FE)
+summary(train_FE$status_group)
+index = createDataPartition(train_FE$status_group, p=0.75, list=FALSE, times=1) 
+training = train_FE[index,]
+validation = train_FE[-index,]
+```
+
+# 7. MODELING
+Due to the high amount of factors and the complexity of the dataset we will start our analysis with a decision tree over a linear model.
+
+## Variable importance and parameter tunning:
+We run a RandomForest algorith using Caret package with most features once in order to obtain best parameters and more:
+- parameter tunning: we got that the optimal mtry is 43 and we will use that value fixed for future models.
+- features importance. confirm if the analysis previously done is aligned with the model results.
+
+```{r}
+train_FE$status_group <- as.factor(recode(train_FE$status_group, 'functional' = 'F', 'functional needs repair' = "FNR", 'non functional' = "NF")) # depending on the model we need to remove spaces from the labels.
+
+RandomForest.model <-  function(training_dataset){
+  
+trainControlRandomForest <- trainControl(method = "cv", 
+                                  number = 5, 
+                                  verboseIter = F,
+                                  allowParallel = TRUE,
+                                  sampling = 'up',
+                                  summaryFunction = multiClassSummary,
+                                  classProbs = T)
+                                  
+  set.seed(123)  
+  registerDoMC(cores=4)
+  this.model <- train(status_group~ ., data = training_dataset, 
+                      method = "rf", 
+                      metric = "Accuracy",
+                      trControl = trainControlRandomForest,
+                      tuneLength = 25, # for random search
+                      num.threads = 4
+  ) 
+  return(this.model)
+}
+
+RandomForestModel <- RandomForest.model(train_FE)
+
+fitted <- predict(RandomForestModel, validation)
+confusionMatrix(reference = validation$status_group, data = fitted, mode = 'everything')
+varimp_RandomForest <- varImp(model_rf)
+plot(varimp_rf)
+
+#simple and straightforward model with no train control. Difference in results are not significant.
+#model_rf <- train(status_group ~., data = training, method = 'rf')
+#fitted <- predict(model_rf, validation)
+#model_rf
+#confusionMatrix(reference = validation$status_group, data = fitted, mode = 'everything')
+#varimp_rf <- varImp(model_rf)
+#plot(varimp_rf)
+```
+
+Although we tried a rf model using cv we didnt continue using that model due to the following:
+- time and resources consuming of the cross validation doesn't justify the improvement on the total accuracy of the model. We observe an improvement on the accuracy detecting the fuctional needs repair.
+- model without cv is not overfiting
+
+
+## Test of different combinations of Features using a lighter and simpler version of the RandomForest model with parameters already set.
+We will use this model to try the different FE and FS techniques done. Due to high computational cost that represents tunning the parameters every time we will continue with the best combination of values obtained above.
+```{r}
+#mtry <- round((length(train_FE))^0.5,0) # recomended value is the sqroot of the number of features
+mtry <- 43
+ntree = 100 
+x <- training[,!(names(training) %in% c("status_group"))]
+y <- as.factor(training$status_group)
+rf = randomForest(x,y, mtry=mtry, ntree=ntree)
+
+fitted <- predict(rf, validation)
+cm <- confusionMatrix(reference = validation$status_group, data = fitted, mode = 'everything')
+cm
+rf.var.imp <- varImp(rf)
+rf.var.imp <- tibble::rownames_to_column(rf.var.imp,'VarImp')
+rf.var.imp
+ggplot(rf.var.imp, aes(x = reorder(VarImp, Overall), y = Overall)) +    
+  geom_col() +
+  ylab("Importance") +
+  xlab("") +
+  coord_flip()
+```
+
+```{r}
+comparisonDF <- data.frame(Model = character(), HyperParam_mtry = character(), HyperParam_tree = character, Accuracy = numeric(), Treatment = character()) # this line should be run only once to create the table.
+```
+
+```{r Model Compare function}
+comparison <- data.frame( Model = 'RandomForest',
+                  HyperParam_mtry = mtry,
+                  HyperParam_ntree = ntree,
+                  Accuracy = cm$overall[1],
+                  Treatment = "considering chi-square features selection") #Manual description of                    the FEandFS done build df_FE 
+```
+
+```{r comparison DF}
+comparisonDF <- rbind(comparisonDF, comparison)
+comparisonDF
+```
+
+
+----------------------------------------------------------------------------------------------------
+To finallize, we will run a couple of xgboost with the best predictors (combination of features) obtained on previous analysis. 
+
+```{r}
+train_FE$status_group <- as.factor(recode(train_FE$status_group, 'functional' = '1', 'functional needs repair' = "2", 'non functional' = "3")) # depending on the model we need to remove spaces from the labels.
+
+# doing a random search will be very expensive, instead we built a grid search:
+
+param_grid <- expand.grid(
+  nrounds = seq(0,200, 10),
+  eta = c(0.01, 0.1, 0.2),
+  subsample = c(0.5,1.0),
+  colsample_bytree = c(0.5,1.0),
+  max_depth = c(5,10),
+  gamma = seq(0,1,0.2), 
+  min_child_weight = 1
+)
+
+xgb_control <- trainControl(
+  method="cv",
+  number = 5,
+  summaryFunction = multiClassSummary,
+  allowParallel = TRUE
+)
+
+set.seed(123)
+registerDoMC(cores=4)
+xgb.tuned <- train(status_group~., data=train_FE, trControl=xgb_control, tuneGrid=param_grid,lambda=0, method="xgbTree")
+xgb.tuned
+```
+
+```{r}
+xgb.tuned$bestTune
+```
+
+# 8 PREDICTION (Competition)
+
+# final predictions file creation.
+
+```{r Predictions}
+#with final model
+predict_FE$status_group <- predict$status_group
+#after applying same transformations we did to train to predict
+final.pred <- predict(rf, predict_FE, type = 'response')
+predictions <- data.frame(id = predict_labels$id, status_group = (final.pred))
+colnames(predictions) <-c("id", "status_group")
+#predictions$status_group <- as.factor(recode(predictions$status_group, '1' = 'functional', '2' = "functional needs repair", '3' = "non functional"))
+write.csv(predictions, file = "predictions.csv", row.names = FALSE) 
+```
+
+----------------------------------------------------------------------------------------------------------------------
+
+# Annex 
+# Other models with cv and parameter optimization 
+- Results with the Linear models is significantly lower than the tree family.
+- SVM is a too complex model for this dataset and analysis
+- PCA is not effective due to the low number of numeric features on the dataset.
+- ramdom search of hyperparameters its computational too expensive.
+```{r Model with CV Functions}
+
+Glmnet.model <- function(training_dataset) {
+  trainControlLasso <- trainControl(method = "cv", 
+                                    number = 5, 
+                                    returnResamp = "all",
+                                    verboseIter = F,
+                                    sampling = "up",
+                                    summaryFunction = multiClassSummary,
+                                    classProbs = T)
+  
+  gridGlmnet<- expand.grid(alpha = seq(0, 1, by = 0.01), 
+                         lambda = seq(0.001, 0.05, by = 0.01)) 
+  
+  set.seed(123)  
+  this.model <- train(status_group~ ., data = training_dataset, 
+                           method = "glmnet", 
+                           metric = "Accuracy",
+                           trControl = trainControlLasso,
+                           tuneGrid = gridGlmnet
+                           ) 
+  
+  
+  return(this.model)
+}
+
+Tree.model <-  function(training_dataset){
+  trainControlTree <- trainControl(method = "cv", 
+                                   number = 5, 
+                                   returnResamp = "all",
+                                   verboseIter = F,
+                                   allowParallel = TRUE,
+                                   sampling = "up",
+                                   summaryFunction = multiClassSummary,
+                                   classProbs = T)
+
+  
+  
+  set.seed(123)  
+  this.model <- train(status_group~ ., data = training_dataset, 
+                     method = "rpart", 
+                     metric = "Accuracy",
+                     trControl = trainControlTree,
+                     tuneLength = 20 # for random search
+  ) 
+  return(this.model)
+}
+
+XGB.model <-  function(training_dataset){
+  
+  trainControlXGB <- trainControl(method = "cv", 
+                                  number = 2, 
+                                  returnResamp = "all",
+                                  verboseIter = F,
+                                  allowParallel = TRUE,
+                                  sampling = "up",
+                                  summaryFunction = multiClassSummary,
+                                  classProbs = T)
+                                  
+  registerDoMC(cores=4)
+  set.seed(123)  
+  this.model <- train(status_group ~ ., data = training_dataset, 
+                    method = "xgbTree", 
+                    metric = "Accuracy",
+                    trControl = trainControlXGB,
+                    tuneLength = 2, # for random search
+                    num.threads = 2
+                    ) 
+  
+  return(this.model)
+}
+
+lm.model <- function(training_dataset) {
+  
+  # Create a training control configuration that applies a 5-fold cross validation
+  train_control_config <- trainControl(method = "repeatedcv", 
+                                       number = 3, 
+                                       repeats = 1,
+                                       returnResamp = "all",
+                                       verboseIter = F,
+                                       summaryFunction = multiClassSummary,
+                                       classProbs = T)
+  
+  # Fit a glm model to the input training data
+  set.seed(123)
+  this.model <- train(status_group~ .,
+                      data = training_dataset, #the dataset is what will change 
+                      method = "glm", 
+                      metric = "Accuracy",
+                      preProc = c("center", "scale"),
+                      trControl=train_control_config)
+  
+  return(this.model)
+}
+
+```
+
+```{r Run Models}
+train_FE$status_group <- as.factor(recode(train_FE$status_group, 'functional' = 'F', 'functional needs repair' = "FNR", 'non functional' = "NF"))
+
+LmModel <- lm.model(train_FE) ### not good for this exercise
+GLmnetModel <- Glmnet.model(train_FE) ### not good for this exercise
+TreeModel <- Tree.model(train_FE) ### this is the model we should run once with the best FE.
+XGBModel <- XGB.model(train_FE) ### this is the model we should run once with the best FE.
+RandomForestModel <- RandomForest.model(train_FE) ### this is the model we should run once with the best FE.
+```
+
